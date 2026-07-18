@@ -3,3 +3,5 @@ target/
 .idea/
 *.iml
 .env
+.vscode/
+.DS_Store
