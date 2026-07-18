@@ -10,16 +10,64 @@ Order/payment flows have a classic hard problem: when a service commits to its d
 
 ## Architecture
 
-```
-   Client ──REST(JWT)──▶ Order Service ──┐
-                            │ (Postgres)  │ outbox table (same tx as order)
-                            └─────────────┤──poller──▶ Kafka: order.events ──▶ Payment Service ──▶ Postgres
-                                          │                                         │
-                Kafka: payment.results ◀──┴─────────────────────────────────────────┘
-                          │
-                          └──▶ Order Service confirms/cancels order (saga complete)
+```mermaid
+flowchart LR
+    Client([Client])
 
-   Poison order events ──retry×3──▶ Kafka: order.events.DLT
+    subgraph order["Order Service · :8081"]
+        direction TB
+        API[REST API<br/>JWT-secured]
+        ODB[(Postgres<br/>orders + outbox)]
+        POLL[Outbox poller<br/>SKIP LOCKED]
+        API -->|"order + event<br/>(one transaction)"| ODB
+        ODB --> POLL
+        SAGA[Payment-result<br/>consumer]
+    end
+
+    subgraph payment["Payment Service · :8082"]
+        direction TB
+        PC[Idempotent<br/>consumer]
+        PDB[(Postgres<br/>payments + ledger)]
+        PC --> PDB
+    end
+
+    ORDERS{{"Kafka<br/>order.events"}}
+    RESULTS{{"Kafka<br/>payment.results"}}
+    DLT{{"Kafka<br/>order.events.DLT"}}
+
+    Client -->|POST /api/orders| API
+    POLL -->|publish| ORDERS
+    ORDERS --> PC
+    PC -->|approve / decline| RESULTS
+    PC -.->|poison msg<br/>after 3 retries| DLT
+    RESULTS --> SAGA
+    SAGA -->|confirm / cancel| ODB
+```
+
+**Happy path and the failure path, as a sequence:**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Client
+    participant O as Order Service
+    participant K as Kafka
+    participant P as Payment Service
+
+    C->>O: POST /api/orders (JWT)
+    Note over O: persist order + outbox row<br/>in ONE transaction
+    O-->>C: 201 Created (PENDING)
+    O->>K: OrderPlaced (outbox poller)
+    K->>P: OrderPlaced
+    Note over P: dedupe by event id,<br/>then authorize payment
+    alt payment approved / declined
+        P->>K: PaymentResult
+        K->>O: PaymentResult
+        Note over O: order → CONFIRMED / CANCELLED
+    else processing fails repeatedly
+        Note over P: retry ×3 with backoff
+        P->>K: route to order.events.DLT
+    end
 ```
 
 - **Order Service** — accepts orders over JWT-secured REST APIs, persists them, and writes an `OrderPlaced` event to a **transactional outbox** in the *same* DB transaction (no dual write). Consumes `payment.results` to confirm/cancel.
