@@ -7,6 +7,8 @@ import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -25,6 +27,8 @@ public class Payment {
     @Column(nullable = false)
     private BigDecimal amount;
 
+    // CHAR(3) in the migration; without this Hibernate expects VARCHAR and schema validation fails.
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(nullable = false, length = 3)
     private String currency;
 
