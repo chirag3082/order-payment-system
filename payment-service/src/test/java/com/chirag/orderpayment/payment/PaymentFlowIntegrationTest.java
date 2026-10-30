@@ -17,6 +17,7 @@ import org.springframework.kafka.test.utils.KafkaTestUtils;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -46,6 +47,19 @@ class PaymentFlowIntegrationTest extends IntegrationTestBase {
         return consumer;
     }
 
+    /**
+     * Topics are shared across tests and a new group reads from the earliest offset, so
+     * other tests' results show up too. Wait for the record with this key.
+     */
+    private ConsumerRecord<String, String> awaitRecordWithKey(Consumer<String, String> consumer, String key) {
+        List<ConsumerRecord<String, String>> seen = new ArrayList<>();
+        await().atMost(Duration.ofSeconds(20)).until(() -> {
+            consumer.poll(Duration.ofMillis(500)).forEach(seen::add);
+            return seen.stream().anyMatch(r -> key.equals(r.key()));
+        });
+        return seen.stream().filter(r -> key.equals(r.key())).findFirst().orElseThrow();
+    }
+
     private void publishOrder(OrderPlacedEvent event) throws Exception {
         kafka.send(Topics.ORDER_EVENTS, event.orderId(), objectMapper.writeValueAsString(event));
     }
@@ -61,9 +75,8 @@ class PaymentFlowIntegrationTest extends IntegrationTestBase {
             OrderPlacedEvent event = order(new BigDecimal("99.00"));
             publishOrder(event);
 
-            ConsumerRecord<String, String> record =
-                    KafkaTestUtils.getSingleRecord(results, Topics.PAYMENT_RESULTS, Duration.ofSeconds(20));
-            assertThat(record.value()).contains(event.orderId()).contains("APPROVED");
+            ConsumerRecord<String, String> record = awaitRecordWithKey(results, event.orderId());
+            assertThat(record.value()).contains("APPROVED");
         }
     }
 

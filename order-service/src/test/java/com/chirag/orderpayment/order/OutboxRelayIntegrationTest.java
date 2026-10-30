@@ -15,6 +15,8 @@ import org.springframework.kafka.test.utils.KafkaTestUtils;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -33,8 +35,22 @@ class OutboxRelayIntegrationTest extends IntegrationTestBase {
         Map<String, Object> props = KafkaTestUtils.consumerProps(KAFKA.getBootstrapServers(), group, "true");
         Consumer<String, String> consumer = new DefaultKafkaConsumerFactory<>(
                 props, new StringDeserializer(), new StringDeserializer()).createConsumer();
-        consumer.subscribe(java.util.List.of(Topics.ORDER_EVENTS));
+        consumer.subscribe(List.of(Topics.ORDER_EVENTS));
         return consumer;
+    }
+
+    /**
+     * The containers (and so the topic) are shared across tests, and a new group reads
+     * from the earliest offset, so other tests' events show up too. Wait for the record
+     * with this key instead of expecting it to be the only one.
+     */
+    private ConsumerRecord<String, String> awaitRecordWithKey(Consumer<String, String> consumer, String key) {
+        List<ConsumerRecord<String, String>> seen = new ArrayList<>();
+        await().atMost(Duration.ofSeconds(15)).until(() -> {
+            consumer.poll(Duration.ofMillis(500)).forEach(seen::add);
+            return seen.stream().anyMatch(r -> key.equals(r.key()));
+        });
+        return seen.stream().filter(r -> key.equals(r.key())).findFirst().orElseThrow();
     }
 
     @Test
@@ -42,10 +58,8 @@ class OutboxRelayIntegrationTest extends IntegrationTestBase {
         try (Consumer<String, String> consumer = testConsumer("test-relay")) {
             Order order = orderService.placeOrder("cust-1", new BigDecimal("42.00"), "USD");
 
-            ConsumerRecord<String, String> record =
-                    KafkaTestUtils.getSingleRecord(consumer, Topics.ORDER_EVENTS, Duration.ofSeconds(15));
+            ConsumerRecord<String, String> record = awaitRecordWithKey(consumer, order.getId());
 
-            assertThat(record.key()).isEqualTo(order.getId());
             assertThat(record.value()).contains(order.getId()).contains("cust-1");
             // The outbox row must be marked published once relayed.
             await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
@@ -62,9 +76,8 @@ class OutboxRelayIntegrationTest extends IntegrationTestBase {
                 "corr-1"));
 
         try (Consumer<String, String> consumer = testConsumer("test-recovery")) {
-            ConsumerRecord<String, String> record =
-                    KafkaTestUtils.getSingleRecord(consumer, Topics.ORDER_EVENTS, Duration.ofSeconds(15));
-            assertThat(record.key()).isEqualTo("order-xyz");
+            ConsumerRecord<String, String> record = awaitRecordWithKey(consumer, "order-xyz");
+            assertThat(record.value()).contains(eventId);
             await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                     assertThat(outbox.findById(eventId)).get()
                             .matches(OutboxEvent::isPublished));
